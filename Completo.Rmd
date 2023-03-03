@@ -339,34 +339,34 @@ Parameter |   Value   |     Description
 
 ``` {r filter_matrix}
 
-PosArgs <- as.character(commandArgs(trailingOnly = TRUE)) #Reading positional argument 
+homologues_dir_path <- "/home/arquea/Pangenómica/Arqueas_2023/gbk_files_homologues/"
+cluster_list_file_path <- list.files(path = homologues_dir_path, pattern=".cluster_list", full.names = TRUE)
+cluster_list_file <- read_lines(cluster_list_file_path)
 
-salida_gethoms <- PosArgs[1]
-archivo_especies <- PosArgs[2]
-
-clusterverse <- list.files(path = salida_gethoms, pattern=".faa")
-genomeverse <- readLines(archivo_especies)
+test_cluster <- grepl("cluster ", cluster_list_file)
+clusterverse <- cluster_list_file[test_cluster] %>% gsub("cluster ","",.) %>% gsub(" .*","",.) %>% unique()
+genomeverse <- cluster_list_file[!test_cluster] %>% gsub(": _","",.) %>% unique()
 
 pan_matrix <- matrix(nrow = length(clusterverse), ncol = length(genomeverse))
-rownames(pan_matrix) <- clusterverse
 colnames(pan_matrix) <- genomeverse
+rownames(pan_matrix) <- clusterverse
+pan_matrix[] <- 0L            
 
-for (i in 1:nrow(pan_matrix)) {
-  cur_clust <- paste(salida_gethoms,clusterverse[i],sep = "/")
-  cur_headers <- system(paste("grep '>'",cur_clust),intern = TRUE)
-  for (j in 1:ncol(pan_matrix)) {
-    cur_genome <- genomeverse[j]
-    if(any(base::grepl(cur_genome,cur_headers))){
-      pan_matrix[i,j] <- 1
-    }else{
-      pan_matrix[i,j] <- 0
-    }
+index_cluster = 0
+
+for (e in cluster_list_file) {
+  if(grepl("cluster ", e)){
+    index_cluster = index_cluster + 1
+    cur_clust <- e %>% gsub("cluster ","",.) %>% gsub(" .*","",.)
+  }else{
+    cur_genome <- e %>% gsub(": _","",.)
+    index_genome <- grep(cur_genome,genomeverse)
+    pan_matrix[index_cluster,index_genome] <- 1
   }
-  print(nrow(pan_matrix)-i)
 }
 
-write.csv(pan_matrix, file = "binary_pangenome_matrix.csv")
-
+write.csv(pan_matrix, file = "les_nutries.csv")
+  
 ``` 
 
 
@@ -376,11 +376,11 @@ write.csv(pan_matrix, file = "binary_pangenome_matrix.csv")
 
 ``` {r filter_matrix}
 #### FILTRAR MATRIZ (NO SINGLETONES)
+unfiltered_binary_pangenome_matrix <- as.data.frame.array(pan_matrix)
 
-binary_pangenome_matrix_plus_sum <- unfiltered_binary_pangenome_matrix[,-1] %>%
+binary_pangenome_matrix_plus_sum <- unfiltered_binary_pangenome_matrix %>%
   replace(is.na(.), 0) %>%
   mutate(sum= rowSums(.))
-rownames(binary_pangenome_matrix_plus_sum)<- unfiltered_binary_pangenome_matrix[,1]
 
 plot(hist(binary_pangenome_matrix_plus_sum$sum))
 
@@ -403,8 +403,8 @@ plot(hist(binary_pm_No_singletones$sum))
 
 table(as.character(binary_pangenome_matrix_plus_sum$sum)) %>% sort()
 
-binary_pangenome_matrix <- binary_pm_No_singletones_No_Hypothetical[,!(colnames(binary_pangenome_matrix)=="sum")]
-
+binary_pangenome_matrix <- binary_pm_No_singletones_No_Hypothetical[,!(colnames(binary_pm_No_singletones_No_Hypothetical)=="sum")]
+write_csv(binary_pangenome_matrix, "/home/arquea/Downloads/revbayes-v1.2.1-linux64/revbayes-v1.2.1/data/matriz_pangenomica_nutries_no_singletones_no_hypothetical.csv")
 ```
 
 ### 6) Construcción de filogenia
@@ -419,13 +419,133 @@ Distance_matrix.tb <- as.data.frame(as.matrix(Distance_matrix))
 colnames(Distance_matrix.tb) <- colnames(binary_pangenome_matrix)
 rownames(Distance_matrix.tb) <- colnames(binary_pangenome_matrix)
 
-Distance_matrix.tb <- Distance_matrix.tb[-1, -1]
+Distance_matrix.tb <- Distance_matrix.tb[-1, -1]   #Este sólo si se añade una columna y una fila sin valores
 
-Distance_matrix.tb <- Distance_matrix.tb[-grep("tmp", rownames(Distance_matrix.tb)), -grep("tmp", rownames(Distance_matrix.tb))]
+Distance_matrix.tb <- Distance_matrix.tb[-grep("tmp", rownames(Distance_matrix.tb)), -grep("tmp", rownames(Distance_matrix.tb))]  #y este
 
 
 NJ <- ape::njs(as.dist(Distance_matrix.tb))
 
-ape::write.tree(NJ, "Filogenia_nosingle_nohypo.txt")
 
+#Añadir valores de bootstrap
+
+
+library(ape)
+f <- function(njs) njs(as.dist(Distance_matrix.tb))
+boot_values <- boot.phylo(NJ, Distance_matrix.tb, f, B = 300, block = 1)
+boot_values
+
+
+######Probar con #####
+
+
+library(phangorn)
+
+f <- function(njs) njs(as.dist(Distance_matrix.tb))
+
+NJtrees <- bootstrap.pml(Distance_matrix.tb, f, bs = 100)
+
+treeBS <- plotBS( NJ, NJtrees, "phylogram") 
+
+NJ$node.label <- boot_values
+######################
+ape::write.tree(NJ, "Filogenia_Abe&Hilda.txt")
+
+```
+
+
+```{r Filogenia_bayesiana}
+library(phangorn)
+
+library(phytools)
+library(ape)
+
+library(MCMCtreeR)
+
+phy_dat <- phyDat(binary_pangenome_matrix, type = "USER", levels = c("0", "1"))
+
+
+parsimony(phy_dat)
+
+
+dist_jaccard <- dist(as.matrix(binary_pangenome_matrix), method = "binary")
+nj_tree <- nj(dist_jaccard)
+
+n_edges <- nrow(nj_tree$edge) + 1
+edge <- matrix(0, nrow = 2, ncol = (2 * n_edges))
+edge[1, ] <- 1:n_edges
+edge[2, 1] <- seq(n_edges, length.out = n_edges)
+edge[2, 2] <- nj_tree$edge[, 2] + n_edges
+edge[2, 3:n_edges] <- nj_tree$edge[, 1] + n_edges
+
+# Crear objeto pbtree
+pbtree_obj <- pbtree(phy_dat, edge = edge, method = "mcmc")
+
+pbtree_obj <- pbtree(phy_dat, tree = nj_tree, method = "mcmc")
+
+
+
+```
+
+
+``` {r filter_matrix}
+#### FILTRAR MATRIZ (NO SINGLETONES)
+unfiltered_binary_pangenome_matrix <- as.data.frame.array(pan_matrix)
+
+binary_pangenome_matrix_plus_sum <- unfiltered_binary_pangenome_matrix[,-1] %>%
+  replace(is.na(.), 0) %>%
+  mutate(sum= rowSums(.))
+
+plot(hist(binary_pangenome_matrix_plus_sum$sum))
+
+#Filtrar singletones
+
+porcentaje=5
+```
+
+
+
+```{r jo}
+# Cargar la matriz de caracteres binarios
+matriz_caracteres <- binary_pangenome_matrix
+
+# Calcular la matriz de distancia de Jaccard
+dist_jaccard <- as.dist(dist(as.matrix(matriz_caracteres), method = "binary"))
+
+# Generar un árbol de Neighbor-Joining
+d <- attr(dist_jaccard, "Size")
+X <- 1:d
+Y <- rep(0, d)
+splits <- vector(mode = "list", length = d - 1)
+for (k in 2:d) {
+    Xk <- X[1:(d - k + 1)]
+    Y[k] <- sum(dist_jaccard[Xk, k]) / (d - 2)
+    splits[[k - 1]] <- cbind(Xk, rep(k, length(Xk)))
+    X <- c(X, k)
+}
+nj_tree <- list(edge = cbind(0, Y), tip.label = 1:d, edge.length = rep(0, d - 1), Nnode = d - 1, node.label = NULL)
+
+# Crear objeto phyDat
+phy_dat <- list(type = "USER", character = as.character(t(matriz_caracteres)))
+
+# Crear objeto edge
+n_edges <- nj_tree$Nnode + nj_tree$Ntip
+edge <- matrix(0, nrow = 2, ncol = (2 * n_edges))
+edge[1, ] <- 1:n_edges
+edge[2, 1] <- seq(nj_tree$Ntip + 1, length.out = nj_tree$Nnode) + nj_tree$Ntip
+edge[2, 2] <- nj_tree$edge[, 2] + nj_tree$Ntip
+edge[2, 3:nj_tree$Nnode] <- nj_tree$edge[, 1] + nj_tree$Ntip
+
+# Realizar el análisis de MCMC
+set.seed(123)  # Fijar la semilla para reproducibilidad
+n_gen <- 10000  # Número de generaciones
+sample_freq <- 10  # Frecuencia de muestreo
+n_samples <- n_gen / sample_freq  # Número de muestras
+samples <- matrix(0, nrow = n_samples, ncol = nj_tree$Nnode + nj_tree$Ntip)
+samples[1, ] <- rep(1, nj_tree$Nnode + nj_tree$Ntip)
+for (i in 2:n_samples) {
+    for (j in 1:sample_freq) {
+        samples[(i - 1) * sample_freq + j, ] <- update_tree(nj_tree, samples[(i - 2) * sample_freq + j, ])
+    }
+}
 ```
